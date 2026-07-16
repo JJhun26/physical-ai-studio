@@ -2,27 +2,46 @@ import asyncio
 import sys
 
 from schemas import Robot
-from schemas.robot import SO101Robot, TrossenBimanualRobot, TrossenSingleArmRobot
+from schemas.robot import FR5Robot, SO101Robot, TrossenBimanualRobot, TrossenSingleArmRobot
 
 
 class IPDiscovery:
+    @staticmethod
+    def _ping_command(ip: str, ping_timeout: float) -> list[str]:
+        """Build a single-shot ping bounded by ping_timeout.
+
+        The timeout flag differs per platform and is not interchangeable:
+        Windows takes ``-w`` in milliseconds, BSD/macOS ``-W`` in milliseconds, and
+        iputils (Linux) ``-W`` in *seconds*. Passing milliseconds to Linux turns a
+        1s budget into a ~17 minute hang.
+        """
+        if sys.platform.lower().startswith("win"):
+            return ["ping", "-n", "1", "-w", str(int(ping_timeout * 1000)), ip]
+        if sys.platform == "darwin":
+            return ["ping", "-c", "1", "-W", str(int(ping_timeout * 1000)), ip]
+        return ["ping", "-c", "1", "-W", str(max(1, round(ping_timeout))), ip]
+
     @staticmethod
     async def ping(ip: str, ping_timeout: float = 1.0) -> bool:
         """Async ping using system ping command.
         Works on macOS/Linux/Windows.
         """
-        param = "-n" if sys.platform.lower().startswith("win") else "-c"
-        command = ["ping", param, "1", "-W", str(int(ping_timeout * 1000)), ip]
-
         proc = await asyncio.create_subprocess_exec(
-            *command,
+            *IPDiscovery._ping_command(ip, ping_timeout),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        return (await proc.wait()) == 0
+        # Belt and braces: an unreachable host must never hold the online endpoint
+        # open, whatever the local ping does with its own timeout flag.
+        try:
+            return (await asyncio.wait_for(proc.wait(), timeout=ping_timeout + 1.0)) == 0
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return False
 
     async def is_reachable(self, robot: Robot) -> bool:
-        if not isinstance(robot, SO101Robot | TrossenSingleArmRobot):
+        if not isinstance(robot, SO101Robot | TrossenSingleArmRobot | FR5Robot):
             return False
         if not robot.payload.connection_string:
             return False

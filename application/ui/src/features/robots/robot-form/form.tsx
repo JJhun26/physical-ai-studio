@@ -5,7 +5,9 @@ import { useProjectId } from '../../../features/projects/use-project';
 import { paths } from '../../../router';
 import { useRobotCatalogQuery } from '../robot-catalog.hooks';
 import { SchemaRobotType } from '../robot-types';
+import { FR5FormFields } from './catalog/fr5';
 import { SO101FormFields } from './catalog/so101';
+import { UArmFormFields } from './catalog/uarm';
 import { WidowxAIFormFields } from './catalog/widowxai';
 import { BiManualWidowxAIFormFields } from './catalog/widowxai-bimanual';
 import { useRobotForm, useRobotFormFields, useSetRobotForm } from './provider';
@@ -51,6 +53,17 @@ export const FormFields = () => {
         case 'Trossen_Bimanual_WidowXAI_Follower':
             formFields = <BiManualWidowxAIFormFields />;
             break;
+        case 'FR5_Follower':
+            formFields = <FR5FormFields />;
+            break;
+        case 'UArm_Leader':
+            formFields = <UArmFormFields />;
+            break;
+        default:
+            // A type reachable from the catalog but missing here renders a form with
+            // no payload fields and a permanently disabled submit, with nothing
+            // failing loudly. Assigning to `never` turns that into a compile error.
+            activeType satisfies never;
     }
 
     return (

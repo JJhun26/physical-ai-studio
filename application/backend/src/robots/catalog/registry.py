@@ -1,6 +1,6 @@
 from schemas.robot import RobotType
 
-from . import so101, widowxai
+from . import fr5, so101, uarm, widowxai
 from .types import RobotCatalogDefinition
 
 
@@ -8,7 +8,12 @@ class RobotCatalogRegistry:
     def __init__(self) -> None:
         self._definitions: dict[RobotType, RobotCatalogDefinition] = {}
 
-        for definition in so101.get_definitions() + widowxai.get_definitions():
+        for definition in (
+            so101.get_definitions()
+            + widowxai.get_definitions()
+            + fr5.get_definitions()
+            + uarm.get_definitions()
+        ):
             self.register(definition)
 
     def list_definitions(self) -> list[RobotCatalogDefinition]:

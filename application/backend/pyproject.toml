@@ -13,6 +13,10 @@ dependencies = [
   "physicalai-train[pi0,smolvla]",
   "physicalai[robots, capture]",
   "lerobot[feetech]==0.5.1",
+  # Required by the vendored scservo_sdk (robots/drivers/vendor). Currently also a
+  # transitive dep of lerobot[feetech]; declared so the uArm leader keeps working
+  # if that ever changes.
+  "pyserial",
   "numpy",
   "websockets",
   'pyrealsense2-macosx; sys_platform == "darwin"',
@@ -186,7 +190,9 @@ preview = false
 src = ["src"]
 
 # Backend-specific excludes
-extend-exclude = [".venv*"]
+# Vendored third-party SDKs are kept byte-identical to upstream; linting them
+# would only produce noise we must not fix. See src/robots/drivers/vendor.
+extend-exclude = [".venv*", "src/robots/drivers/vendor"]
 
 [tool.ruff.lint]
 # Backend uses a subset of rules (different from library's ALL)
@@ -228,6 +234,7 @@ search-path = ["src"]
 project-includes = ["src"]
 project-excludes = [
   "src/alembic/versions/**",
+  "src/robots/drivers/vendor/**",
   ".venv/**",
   "dist/**",
 ]

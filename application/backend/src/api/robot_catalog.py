@@ -35,6 +35,15 @@ def _to_response(definition: RobotCatalogDefinition) -> RobotCatalogDefinitionRe
 
 router = APIRouter(prefix="/api/robots/catalog", tags=["Robot Catalog"])
 
+# Robot assets are edited in place (a new gripper mesh, a re-exported URDF) while the UI
+# keeps running. FileResponse sends only etag/last-modified, and with no Cache-Control a
+# browser falls back to heuristic freshness -- 10% of the file's age, so a URDF checked out
+# days ago is served from disk cache for hours without ever asking us, and edits appear to
+# do nothing. "no-cache" forces the browser to ask on every load. FileResponse does not
+# answer conditional requests, so each load is a full transfer; these are local-only
+# megabyte-scale files, so correctness wins over the saved bytes.
+_REVALIDATE = {"Cache-Control": "no-cache"}
+
 
 @router.get("")
 async def list_robot_catalog(catalog_service: RobotCatalogServiceDep) -> list[RobotCatalogDefinitionResponse]:
@@ -48,7 +57,7 @@ async def get_robot_catalog_urdf(catalog_service: RobotCatalogServiceDep, robot_
     definition = catalog_service.get_definition(robot_type)
 
     resolved_path = resolve_robot_urdf_path(definition)
-    return FileResponse(resolved_path)
+    return FileResponse(resolved_path, headers=_REVALIDATE)
 
 
 @router.get("/{robot_type}/{asset_path:path}")
@@ -61,4 +70,4 @@ async def get_robot_catalog_asset(
     definition = catalog_service.get_definition(robot_type)
 
     resolved_path = resolve_robot_asset_path(definition, asset_path=asset_path)
-    return FileResponse(resolved_path)
+    return FileResponse(resolved_path, headers=_REVALIDATE)

@@ -4,6 +4,7 @@ import { ActionButton, Flex, Grid, Heading, minmax, repeat, Slider, Switch, View
 import { ChevronDownSmallLight } from '@geti-ui/ui/icons';
 import { radToDeg } from 'three/src/math/MathUtils.js';
 
+import { useRobotCatalogDefinitionQuery } from '../robot-catalog.hooks';
 import { useLoadModelQuery } from '../robot-models-context';
 import { useJointState, useSynchronizeModelJoints } from '../use-joint-state';
 import { useRobot, useRobotId } from '../use-robot';
@@ -78,17 +79,19 @@ const useModelJoints = (): JointsState => {
 const useRobotJointsState = (): JointsState => {
     const robot = useRobot();
     const modelJoints = useModelJoints();
+    const { data: definition } = useRobotCatalogDefinitionQuery(robot.type);
+    const jointMap = definition.joint_map;
 
     const { project_id, robot_id } = useRobotId();
     const { joints } = useJointState(project_id, robot_id);
     useSynchronizeModelJoints(joints, robot.type);
 
     return joints.map((joint) => {
-        const modelJoint = modelJoints.find(({ name }) => name === joint.name);
-        const rangeMax = modelJoint === undefined ? 180 : radToDeg(modelJoint.rangeMax);
-        const rangeMin = modelJoint === undefined ? -180 : radToDeg(modelJoint.rangeMin);
+        // Robot state is keyed by feature name ("j4.pos"); the URDF joint it drives is "j4".
+        const [urdfJointName] = jointMap[joint.name] ?? [];
+        const modelJoint = modelJoints.find(({ name }) => name === urdfJointName);
 
-        return { ...joint, rangeMin, rangeMax };
+        return { ...joint, rangeMin: modelJoint?.rangeMin ?? -180, rangeMax: modelJoint?.rangeMax ?? 180 };
     });
 };
 

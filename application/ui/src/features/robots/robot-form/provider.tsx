@@ -1,7 +1,9 @@
 import { createContext, ReactNode, useCallback, useContext, useMemo, useState } from 'react';
 
 import { SchemaRobot, SchemaRobotInput, SchemaRobotType } from '../robot-types';
+import { getInitialFR5FormData } from './catalog/fr5';
 import { getInitialSO101FormData } from './catalog/so101';
+import { getInitialUArmFormData } from './catalog/uarm';
 import { getInitialWidowxFormData } from './catalog/widowxai';
 import { getInitialBimanualFormData } from './catalog/widowxai-bimanual';
 import { buildRobotBody, type AnyRobotFormData, type FormDataForSchema } from './form-data';
@@ -14,6 +16,8 @@ type RobotFormState = {
     Trossen_WidowXAI_Leader: FormDataForSchema['Trossen_WidowXAI_Leader'];
     Trossen_Bimanual_WidowXAI_Follower: FormDataForSchema['Trossen_Bimanual_WidowXAI_Follower'];
     Trossen_Bimanual_WidowXAI_Leader: FormDataForSchema['Trossen_Bimanual_WidowXAI_Leader'];
+    FR5_Follower: FormDataForSchema['FR5_Follower'];
+    UArm_Leader: FormDataForSchema['UArm_Leader'];
 };
 
 const RobotFormContext = createContext<RobotFormState | null>(null);
@@ -35,6 +39,10 @@ const FORM_DATA_FAMILY: Record<SchemaRobotType, string> = {
     Trossen_WidowXAI_Leader: 'widowx',
     Trossen_Bimanual_WidowXAI_Follower: 'bimanual',
     Trossen_Bimanual_WidowXAI_Leader: 'bimanual',
+    // Own families: each has a single type, so there is no sibling to carry data
+    // to, and their fields mean different things (FR5 = controller IP, uArm = port).
+    FR5_Follower: 'fr5',
+    UArm_Leader: 'uarm',
 };
 
 const getInitialState = (robot?: SchemaRobot): RobotFormState => ({
@@ -51,6 +59,8 @@ const getInitialState = (robot?: SchemaRobot): RobotFormState => ({
     Trossen_Bimanual_WidowXAI_Leader: getInitialBimanualFormData(
         robot?.type === 'Trossen_Bimanual_WidowXAI_Leader' ? robot : undefined
     ),
+    FR5_Follower: getInitialFR5FormData(robot?.type === 'FR5_Follower' ? robot : undefined),
+    UArm_Leader: getInitialUArmFormData(robot?.type === 'UArm_Leader' ? robot : undefined),
 });
 
 export const RobotFormProvider = ({ children, robot }: { children: ReactNode; robot?: SchemaRobot }) => {

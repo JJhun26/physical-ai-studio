@@ -4,10 +4,12 @@ from physicalai.robot.so101 import SO101, SO101Calibration
 from physicalai.robot.trossen import BimanualWidowXAI, WidowXAI
 
 from exceptions import ResourceNotFoundError, ResourceType
+from robots.drivers.fr5_follower import FR5FollowerClient, FR5FollowerConfig
+from robots.drivers.uarm_leader import JointCalibration, UArmLeaderClient, UArmLeaderConfig
 from robots.physicalai_adapter import PhysicalAIRobotAdapter, PhysicalAIRobotAdapterConfig
 from robots.robot_client import RobotClient
 from schemas.calibration import Calibration
-from schemas.robot import Robot, RobotType, SO101Robot, TrossenBimanualRobot
+from schemas.robot import FR5Robot, Robot, RobotType, SO101Robot, TrossenBimanualRobot, UArmRobot
 from services.robot_calibration_service import RobotCalibrationService
 from utils.serial_robot_tools import RobotConnectionManager, find_so101_port, serial_port_from_so101
 
@@ -56,8 +58,48 @@ class RobotClientFactory:
                 return await self._build_so101(robot)
             case RobotType.SO101_LEADER:
                 return await self._build_so101(robot)
+            case RobotType.FR5_FOLLOWER:
+                return self._build_fr5(robot)
+            case RobotType.UARM_LEADER:
+                return await self._build_uarm(robot)
             case _:
                 raise ValueError(f"Unsupported robot type: {robot.type}")
+
+    @staticmethod
+    def _build_fr5(robot: FR5Robot) -> FR5FollowerClient:
+        ip = robot.payload.connection_string or "192.168.58.2"
+        return FR5FollowerClient(FR5FollowerConfig(ip=ip))
+
+    async def _build_uarm(self, robot: UArmRobot) -> UArmLeaderClient:
+        port = robot.payload.connection_string
+        if not port:
+            raise ResourceNotFoundError(ResourceType.ROBOT, robot.payload.serial_number)
+
+        joints: list[JointCalibration] | None = None
+        calibration = await self._get_uarm_calibration(robot)
+        if calibration is not None:
+            # Calibration.values is keyed by joint name (j1..j6); order by name.
+            joints = []
+            for name in (f"j{i}" for i in range(1, 7)):
+                val = calibration.values.get(name)
+                if val is None:
+                    raise ValueError(f"uArm calibration missing joint '{name}'")
+                joints.append(
+                    JointCalibration(
+                        motor_id=val.id,
+                        range_min=val.range_min,
+                        range_max=val.range_max,
+                        drive_mode=val.drive_mode,
+                        homing_offset=val.homing_offset,
+                    )
+                )
+
+        return UArmLeaderClient(UArmLeaderConfig(port=port, joints=joints))
+
+    async def _get_uarm_calibration(self, robot: UArmRobot) -> Calibration | None:
+        if robot.active_calibration_id is None:
+            return None
+        return await self.calibration_service.get_calibration(robot.active_calibration_id)
 
     @staticmethod
     def _build_bimanual_widowxai(
