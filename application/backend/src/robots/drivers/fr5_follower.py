@@ -13,8 +13,10 @@ away with it because its calibrated range happens to be about +-100 deg and cent
 FR5 does not, and j2/j4 -- whose soft limits are not centered on 0 deg -- were drawn
 ~88 deg off. Reporting degrees keeps state, actions and the viewer in one unit.
 
-The uArm leader still publishes -100..100, which lands here as -100..100 deg and is
-then clamped to the usable range. All sign/permutation lives on the leader (uArm
+The uArm leader publishes the same degrees (it used to saturate at +-100, which put j2's
+habitual -150 deg working pose out of reach; see ``uarm_leader.out_limit_deg``). Values
+land here as degrees and are clamped to the usable range -- this clamp, not anything on
+the leader, is what bounds the arm. All sign/permutation lives on the leader (uArm
 calibration), so this driver applies no remapping of its own.
 
 Gripper: the follower carries a DH Robotics PGEA-100-40 parallel gripper, exposed as
@@ -44,7 +46,10 @@ import os
 import sys
 import threading
 import time
+import xmlrpc.client
+from contextlib import suppress
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -52,6 +57,9 @@ from robots.robot_client import RobotClient
 from schemas.robot import RobotType
 
 from . import GRIPPER_FEATURE, GRIPPER_STROKE_M, JOINT_NAMES, NUM_JOINTS, POS_FEATURES
+
+if TYPE_CHECKING:
+    import http.client
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -73,8 +81,24 @@ class FR5FollowerConfig:
     limit_margin_deg: float = 5.0
     # Per-call slew cap (deg). Primary guard against the start-of-teleop jump.
     max_step_deg: float = 2.0
-    # ServoJ interpolation time (s). 0 -> use the worker's goal_time.
+    # ServoJ interpolation time (s): how long the controller takes to consume one point.
+    # It must not exceed the interval points arrive at, or the controller's lookahead
+    # buffer grows by the difference every cycle -- lag climbs without bound until ServoJ
+    # blocks, and the loop then runs at whatever rate the controller drains.
+    #
+    # The worker hands set_joints_state *twice* its loop period (a convention that suits
+    # position-controlled arms, where it means "reach this within two periods"). Taken
+    # literally as cmdT that is 2x the send interval, which is exactly the runaway case:
+    # at 30 Hz it made every point take 66.7 ms, pacing teleoperation at 15 Hz with
+    # visible lag. So 0 means half of what the worker passes -- the true send period.
+    # The SDK recommends 0.001..0.0016 s and defaults to 0.008; a fixed value that small
+    # only makes sense with a matching send rate (the standalone teleop script streams at
+    # 250 Hz with cmdT=0.004), otherwise the arm lurches to each point and waits.
     servo_cmd_t: float = 0.0
+    # How long connect() waits for the SDK's UDP state channel to deliver its first
+    # packet. See _wait_for_state -- reading before it lands is a hard error, not a
+    # stale value, so this is a correctness wait rather than a nicety.
+    state_timeout_s: float = 5.0
 
     # -- PGEA-100-40 gripper --------------------------------------------------
     # Whether the follower drives its parallel gripper via the gripper.pos feature.
@@ -90,6 +114,93 @@ class FR5FollowerConfig:
     gripper_thresh_pct: float = 2.0
     # Cap on how long the worker waits for one open/close to report done (s).
     gripper_motion_timeout_s: float = 3.0
+    # Socket timeout on the gripper's XML-RPC channel. Bounds every gripper call so a
+    # wedged controller degrades the gripper instead of stalling the arm.
+    gripper_rpc_timeout_s: float = 3.0
+
+    # -- collision -----------------------------------------------------------
+    # Per-joint collision threshold, 1 (most sensitive) .. 10, applied at connect.
+    # None leaves whatever the controller is configured with. Raise this if light
+    # contact during teleoperation trips a fault; it does not make contact safe, it
+    # only stops the controller reacting to normal teleoperation loads.
+    collision_level: list[float] | None = None
+    # Clear the fault and carry on rather than leaving the arm dead until the session
+    # is restarted. Never resumes commanding on its own -- see resync_tolerance_deg.
+    auto_recover: bool = True
+    # After a fault the leader is usually still pointing into whatever was hit, so
+    # commanding again would drive straight back in. Streaming stays suspended until
+    # the operator brings the leader within this many degrees of where the arm actually
+    # is, on every joint. That re-sync is the safety interlock, not the reset itself.
+    resync_tolerance_deg: float = 5.0
+
+
+class _TimeoutTransport(xmlrpc.client.Transport):
+    """XML-RPC transport with a socket timeout (``ServerProxy`` exposes no such option)."""
+
+    def __init__(self, timeout: float) -> None:
+        super().__init__()
+        self._timeout = timeout
+
+    def make_connection(self, host: str | tuple[str, dict[str, str]]) -> http.client.HTTPConnection:
+        conn = super().make_connection(host)
+        conn.timeout = self._timeout
+        return conn
+
+
+def _as_int(value: object) -> int:
+    """XML-RPC's declared return is a wide union; these calls always answer an int code."""
+    if isinstance(value, int):
+        return value
+    raise TypeError(f"expected an integer code from the controller, got {value!r}")
+
+
+class _GripperRPC:
+    """The gripper's own XML-RPC channel to port 20003.
+
+    Deliberately **not** a second ``Robot.RPC``. That constructor opens its own tcp/20004
+    state connection, and the controller serves exactly one at a time: the second never
+    completes, the SDK's state thread spins in ``reconnect()`` forever, and every gripper
+    call then parks in ``while self.reconnect_flag: time.sleep(0.1)`` (``Robot.py:4994``).
+    That hung ``connect()``, so ``setup()`` never finished, ``loaded_event`` never fired
+    and the websocket sent no observations at all -- the arm looked frozen in the viewer.
+
+    A bare ``ServerProxy`` still gives the worker thread the separate connection it needs
+    (``ServerProxy`` is not thread-safe) without a second state channel. The SDK's gripper
+    methods are thin wrappers over these same calls; only the return shapes differ, and
+    those are normalised here so ``_GripperWorker`` sees what the SDK would have returned.
+
+    The safety check ``MoveGripper`` would have run is not lost: it reads the cached state
+    packet, which this channel has no access to anyway, and ``ServoJ`` already checks it on
+    every arm command.
+    """
+
+    def __init__(self, ip: str, timeout: float) -> None:
+        self._proxy = xmlrpc.client.ServerProxy(f"http://{ip}:20003", transport=_TimeoutTransport(timeout))
+
+    def ActGripper(self, index: int, action: int) -> int:  # noqa: N802 -- mirrors the SDK's own name
+        return _as_int(self._proxy.ActGripper(int(index), int(action)))
+
+    def MoveGripper(self, *args: float) -> int:  # noqa: N802 -- mirrors the SDK's own name
+        """Positional passthrough; the SDK's own signature is the contract.
+
+        (index, pos%, vel%, force%, maxtime ms, block, type, rotNum, rotVel, rotTorque)
+        """
+        return _as_int(self._proxy.MoveGripper(*args))
+
+    def close(self) -> None:
+        """Drop the HTTP connection behind the proxy."""
+        with suppress(Exception):
+            self._proxy("close")()
+
+    def GetGripperMotionDone(self):  # noqa: N802 -- mirrors the SDK's own name
+        """Raw ``[err, fault, status]`` -> the SDK's ``(err, [fault, status])``."""
+        raw = self._proxy.GetGripperMotionDone()
+        if not isinstance(raw, list | tuple) or not raw:
+            return -1, None
+        err = _as_int(raw[0])
+        if err != 0 or len(raw) < 3:
+            return err, None
+        return err, [raw[1], raw[2]]
 
 
 class _GripperWorker:
@@ -101,7 +212,7 @@ class _GripperWorker:
     uArm->FR5 gripper teleop script; the overlap guard is the load-bearing part.
     """
 
-    def __init__(self, rpc, config: FR5FollowerConfig) -> None:
+    def __init__(self, rpc, config: FR5FollowerConfig, initial_pct: float) -> None:
         self._rpc = rpc
         self._index = config.gripper_index
         self._vel = config.gripper_vel_pct
@@ -109,7 +220,12 @@ class _GripperWorker:
         self._thresh = config.gripper_thresh_pct
         self._timeout = config.gripper_motion_timeout_s
         self._target_pct: float | None = None
-        self._last_cmd_pct: float | None = None
+        # Seeded with where the follower believes the gripper already is, so a target that
+        # never changes never commands. Without this the first cycle always fired one
+        # MoveGripper -- and with no leader trigger configured that target comes from
+        # FR5FollowerClient's *assumed* opening, not from any operator input, so the
+        # gripper was being driven by a guess.
+        self._last_cmd_pct: float | None = initial_pct
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -122,6 +238,12 @@ class _GripperWorker:
         with self._lock:
             self._target_pct = _clamp(pct, 0.0, 100.0)
 
+    def close_rpc(self) -> None:
+        """Release the gripper's XML-RPC channel; safe on any rpc object."""
+        closer = getattr(self._rpc, "close", None)
+        if callable(closer):
+            closer()
+
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
@@ -132,7 +254,7 @@ class _GripperWorker:
         try:
             md = self._rpc.GetGripperMotionDone()
             return isinstance(md, (list, tuple)) and md[0] == 0 and md[1][1] == 1
-        except Exception:  # noqa: BLE001 -- unreadable status: allow the next command
+        except Exception:
             return True
 
     def _run(self) -> None:
@@ -147,7 +269,7 @@ class _GripperWorker:
                     self._last_cmd_pct = target
                     if err != 0:
                         logger.warning(f"FR5 MoveGripper(pos={int(round(target))}%) err={err}")
-                except Exception as e:  # noqa: BLE001 -- keep the worker alive on a transient RPC error
+                except Exception as e:
                     logger.warning(f"FR5 MoveGripper failed: {e}")
                     self._stop.wait(0.1)
                     continue
@@ -166,7 +288,9 @@ class FR5FollowerClient(RobotClient):
 
     def __init__(self, config: FR5FollowerConfig | None = None) -> None:
         self._config = config or FR5FollowerConfig()
-        self._rpc = None
+        # The vendored SDK ships no type information, so the handle is deliberately
+        # untyped: annotating it None-until-connect makes every call site a type error.
+        self._rpc: Any = None
         self._connected = False
         self._servo_started = False
         self._deg_lo: list[float] = []
@@ -177,6 +301,8 @@ class FR5FollowerClient(RobotClient):
         # exposes no position getter, so read_state echoes the last command. Starts at
         # fully open, the pose the gripper is modelled and usually powers on in.
         self._last_gripper_m: float = GRIPPER_STROKE_M
+        self._needs_resync = False
+        self._reported_fault: tuple[int, int] | None = None
 
     @property
     def robot_type(self) -> RobotType:
@@ -206,6 +332,33 @@ class FR5FollowerClient(RobotClient):
         if not (isinstance(ret, list | tuple) and ret[0] == 0):
             raise RuntimeError(f"FR5 GetActualJointPosDegree failed: {ret}")
         return [float(v) for v in ret[1][:NUM_JOINTS]]
+
+    def _wait_for_state(self) -> list[float]:
+        """Block until the SDK's UDP state thread has delivered a state packet.
+
+        ``RPC.__init__`` parks the *class* ``RobotStatePkg`` in ``robot_state_pkg`` and a
+        background thread swaps in a real instance once the first packet arrives. Reading
+        before that raises ``TypeError: '_ctypes.CField' object is not subscriptable``
+        from deep inside the vendored SDK, so this polls instead of racing it. Everything
+        that reads cached state hits the same window -- ``GetSafetyCode``, which ``ServoJ``
+        calls on every command, reads ``robot_state_pkg`` too -- so waiting once here
+        covers the whole driver.
+        """
+        deadline = time.perf_counter() + self._config.state_timeout_s
+        last: Exception | None = None
+        while time.perf_counter() < deadline:
+            try:
+                return self._read_joint_deg()
+            except (TypeError, RuntimeError, AttributeError) as e:
+                last = e
+                time.sleep(0.05)
+        raise RuntimeError(
+            f"FR5 state channel (tcp {self._config.ip}:20004) silent for "
+            f"{self._config.state_timeout_s}s. The controller serves one state connection "
+            f"at a time, so the usual cause is another client already holding it -- an "
+            f"orphaned worker from a previous backend run, or scripts/calibrate_uarm.py. "
+            f"Check with: ss -tanp | grep 20004. Last error: {last}"
+        )
 
     def _resolve_ranges(self) -> None:
         cfg = self._config
@@ -243,7 +396,7 @@ class FR5FollowerClient(RobotClient):
         logger.info(f"Connecting FR5 follower at {self._config.ip}")
         robot_cls = self._import_sdk()
         self._rpc = robot_cls.RPC(self._config.ip)
-        current = self._read_joint_deg()  # validates the link
+        current = self._wait_for_state()  # validates the link and the state channel
         self._rpc.RobotEnable(1)
         self._rpc.Mode(0)  # auto mode
         self._resolve_ranges()
@@ -253,23 +406,42 @@ class FR5FollowerClient(RobotClient):
             "FR5 connected. usable deg ranges: "
             + ", ".join(f"J{j + 1}[{self._deg_lo[j]:.0f},{self._deg_hi[j]:.0f}]" for j in range(NUM_JOINTS))
         )
+        self._apply_collision_level()
         if self._config.gripper_enabled:
-            self._start_gripper(robot_cls)
+            self._start_gripper()
 
-    def _start_gripper(self, robot_cls) -> None:
-        # Dedicated RPC connection: xmlrpc ServerProxy is not thread-safe, so the
-        # gripper worker must not share the arm's _rpc.
+    def _build_gripper_rpc(self):
+        """Seam: overridden in tests so they never dial the real controller."""
+        return _GripperRPC(self._config.ip, self._config.gripper_rpc_timeout_s)
+
+    def _apply_collision_level(self) -> None:
+        """Set the collision threshold for this session only (config=0 -- not persisted)."""
+        level = self._config.collision_level
+        if level is None:
+            return
+        if len(level) != NUM_JOINTS:
+            raise ValueError(f"collision_level needs {NUM_JOINTS} values, got {len(level)}")
+        err = self._rpc.SetAnticollision(0, list(level), 0)
+        if err != 0:
+            logger.warning(f"FR5 SetAnticollision({level}) err={err}")
+        else:
+            logger.info(f"FR5 collision level set to {level} for this session")
+
+    def _start_gripper(self) -> None:
+        # Its own XML-RPC channel, not the arm's: ServerProxy is not thread-safe. See
+        # _GripperRPC for why this must not be a second Robot.RPC.
         try:
-            gripper_rpc = robot_cls.RPC(self._config.ip)
+            gripper_rpc = self._build_gripper_rpc()
             if self._config.gripper_activate:
                 err = gripper_rpc.ActGripper(self._config.gripper_index, 1)
                 if err != 0:
                     logger.warning(f"FR5 ActGripper({self._config.gripper_index},1) err={err}")
-            worker = _GripperWorker(gripper_rpc, self._config)
+            initial_pct = self._last_gripper_m / GRIPPER_STROKE_M * 100.0
+            worker = _GripperWorker(gripper_rpc, self._config, initial_pct=initial_pct)
             worker.start()
             self._gripper = worker
             logger.info(f"FR5 gripper worker started (index={self._config.gripper_index})")
-        except Exception as e:  # noqa: BLE001 -- a missing/faulty gripper must not fail arm teleop
+        except Exception as e:
             logger.warning(f"FR5 gripper unavailable, continuing without it: {e}")
             self._gripper = None
 
@@ -277,6 +449,7 @@ class FR5FollowerClient(RobotClient):
         logger.info("Disconnecting FR5 follower")
         if self._gripper is not None:
             self._gripper.stop()
+            self._gripper.close_rpc()
             self._gripper = None
         try:
             if self._servo_started and self._rpc is not None:
@@ -284,16 +457,99 @@ class FR5FollowerClient(RobotClient):
         except Exception as e:
             logger.warning(f"FR5 ServoMoveEnd on disconnect failed: {e}")
         finally:
+            self._close_rpc()
             self._servo_started = False
             self._connected = False
             # Torque is intentionally left enabled; use the pendant to disable.
+
+    def _close_rpc(self) -> None:
+        """Release the controller's single state connection.
+
+        Without this every ``connect()`` leaks a tcp/20004 socket and its state thread.
+        The controller serves exactly one such connection, so the *second* connect in the
+        same backend process could never succeed: teleoperation worked, then recording
+        failed for the rest of the process's life, and workers left the port held after
+        their session ended.
+
+        ``CloseRPC`` sets its stop event and closes the socket, then trips over
+        ``self.thread`` -- a name its own ``__init__`` never assigns (it keeps the state
+        thread in a local variable). The socket is already closed by that point, so the
+        AttributeError is swallowed here rather than patched into the vendored copy,
+        which has to stay byte-identical to upstream.
+        """
+        if self._rpc is None:
+            return
+        try:
+            self._rpc.CloseRPC()
+        except AttributeError:
+            pass  # vendored CloseRPC's self.thread bug -- the socket is already closed
+        except Exception as e:  # never let teardown mask the reason we are disconnecting
+            logger.warning(f"FR5 CloseRPC failed: {e}")
+        finally:
+            self._rpc = None
 
     # -- state / mapping --------------------------------------------------
 
     def ping(self) -> dict:
         return self._create_event("pong")
 
+    def _read_fault(self) -> tuple[int, int, bool] | None:
+        """(main_code, sub_code, collided) if the controller is faulted, else None.
+
+        Reads the cached state packet, so this costs nothing per cycle.
+        """
+        pkg: Any = getattr(self._rpc, "robot_state_pkg", None)
+        try:
+            main, sub = int(pkg.main_code), int(pkg.sub_code)
+            collided = int(pkg.collisionState) == 1
+        except (AttributeError, TypeError):
+            return None  # state channel not up yet -- _wait_for_state covers that
+        return (main, sub, collided) if (main != 0 or collided) else None
+
+    def _handle_fault(self, main: int, sub: int, collided: bool) -> None:
+        """Clear a controller fault once, then hold off until the leader re-syncs."""
+        if self._reported_fault != (main, sub):
+            self._reported_fault = (main, sub)
+            what = "collision" if collided else "fault"
+            logger.warning(f"FR5 {what} (main={main} sub={sub}); teleoperation suspended")
+        if not self._config.auto_recover or self._needs_resync:
+            return
+        try:
+            self._rpc.ResetAllError()
+            self._rpc.RobotEnable(1)
+            # Servo mode does not survive the fault; the next command re-opens it.
+            self._servo_started = False
+            # Resume from where the arm actually is, not the target it was pushing
+            # towards when it hit -- that one points into the obstacle.
+            self._last_target = self._read_joint_deg()
+            self._needs_resync = True
+            logger.info(
+                f"FR5 fault cleared. Bring the leader back within "
+                f"{self._config.resync_tolerance_deg:.0f} deg of the arm to resume."
+            )
+        except Exception as e:  # a failed reset must not kill the worker
+            logger.warning(f"FR5 could not clear the fault: {e}")
+
+    def _resynced(self, joints: dict) -> bool:
+        """True once the leader points close enough to the arm's real pose to resume."""
+        actual = self._read_joint_deg()
+        worst = max(abs(float(joints[f"{n}.pos"]) - actual[j]) for j, n in enumerate(JOINT_NAMES))
+        if worst > self._config.resync_tolerance_deg:
+            return False
+        logger.info(f"FR5 back in sync ({worst:.1f} deg); resuming teleoperation")
+        self._needs_resync = False
+        self._reported_fault = None
+        self._last_target = actual
+        return True
+
     def set_joints_state(self, joints: dict, goal_time: float) -> dict:
+        fault = self._read_fault()
+        if fault is not None:
+            self._handle_fault(*fault)
+            return self._create_event("joints_state_was_not_set", reason="fault", joints=joints)
+        if self._needs_resync and not self._resynced(joints):
+            return self._create_event("joints_state_was_not_set", reason="awaiting_resync", joints=joints)
+
         if not self._servo_started:
             self._rpc.ServoMoveStart()
             self._servo_started = True
@@ -305,7 +561,8 @@ class FR5FollowerClient(RobotClient):
             step = _clamp(desired - self._last_target[j], -max_step, max_step)
             target.append(self._last_target[j] + step)
 
-        cmd_t = self._config.servo_cmd_t or goal_time
+        # goal_time is the worker's period doubled; halve it back. See servo_cmd_t.
+        cmd_t = self._config.servo_cmd_t or goal_time / 2.0
         err = self._rpc.ServoJ(joint_pos=target, axisPos=[0, 0, 0, 0], cmdT=cmd_t)
         if err != 0:
             logger.warning(f"FR5 ServoJ err={err}")

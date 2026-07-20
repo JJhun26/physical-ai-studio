@@ -1,15 +1,24 @@
 """uArm leader RobotClient (Feetech STS3215 serial bus).
 
 Leader contract for the studio ``TeleoperateWorker``: ``read_state()`` returns
-``{"j1.pos": norm, ..., "j6.pos": norm}`` in -100..100 (SO101's centered
-convention, which the UI viewer treats as degrees). The worker forwards those
+``{"j1.pos": deg, ..., "j6.pos": deg}`` in follower degrees. The worker forwards those
 same-named values straight into the FR5 follower, so *all* per-joint sign,
 permutation and range live in this leader's calibration:
 
     raw = present_position(motor_id) mod 4096            # single-turn absolute
     raw = (raw - homing_offset) mod 4096
-    norm = (raw - range_min) / (range_max - range_min) * 200 - 100   # clamped -100..100
-    if drive_mode == 1: norm = -norm                     # inverted joint
+    deg = (raw - range_min) / (range_max - range_min) * 200 - 100
+    if drive_mode == 1: deg = -deg                       # inverted joint
+    deg = clamp(deg, -out_limit_deg, +out_limit_deg)
+
+The window ``[range_min, range_max]`` spans 200 output units, so a *narrower* window
+amplifies: sizing it below the joint's travel is how the calibration reaches past 100
+deg. That is the point of ``out_limit_deg`` -- this used to clamp hard at +-100, which
+made the FR5's real workspace unreachable (J2 and J4 have soft limits near -263..83, and
+this arm habitually works around J2 = -150). The follower still clamps every command to
+its own soft limits, so that -- not this -- is the safety bound; ``out_limit_deg`` only
+catches a wildly mis-sized window. SO101 keeps its own -100..100 normalisation; this
+leader only ever drives the FR5, which reads its input as degrees.
 
 Workspace notes captured while tuning the standalone teleop script
 (``uarm-xarm-VLAproject``): j1, j2, j4 are inverted, and joint 6 uses a 360°
@@ -61,6 +70,10 @@ class UArmLeaderConfig:
     sdk_path: str = field(default_factory=lambda: os.environ.get("UARM_FEETECH_SDK", ""))
     # One entry per joint j1..j6, in order. Defaults: motor ids 1..6, full turn.
     joints: list[JointCalibration] | None = None
+    # Backstop on the published degrees, not a workspace limit -- the follower clamps to
+    # its own soft limits. Wide enough for the FR5's widest joint (-263..83 deg) plus room
+    # for a full-turn servo; tighten only to catch a mis-sized calibration window.
+    out_limit_deg: float = 360.0
 
     # -- trigger -> gripper.pos ----------------------------------------------
     # The uArm's trigger servo (id 7) maps to the FR5 follower's gripper. Publishing
@@ -159,9 +172,13 @@ class UArmLeaderClient(RobotClient):
                 raw = jc.range_min
             single = (int(raw) - jc.homing_offset) % 4096
             span = jc.range_max - jc.range_min
-            norm = 0.0 if span == 0 else _clamp((single - jc.range_min) / span * 200.0 - 100.0, -100.0, 100.0)
+            norm = 0.0 if span == 0 else (single - jc.range_min) / span * 200.0 - 100.0
             if jc.drive_mode == 1:
                 norm = -norm
+            # Backstop only, applied after the sign flip so it stays symmetric; the
+            # follower's soft-limit clamp is what actually bounds the arm.
+            limit = self._config.out_limit_deg
+            norm = _clamp(norm, -limit, limit)
             state[f"{JOINT_NAMES[j]}.pos"] = norm
         if self._config.gripper_enabled:
             g = self._read_gripper_m()

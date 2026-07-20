@@ -14,10 +14,12 @@
   from it; no DH parameters exist in the uArm, VLA or studio repos. Anything that
   needs true leader geometry (retargeting, collision, calibration) must not read
   it from this file. Replacing it: keep the j1..j6 joint names (the catalog
-  entry in robots/catalog/uarm.py maps j{n}.pos to j{n}), and keep every
-  revolute limit at or beyond +/-100 deg, because the leader publishes a
-  normalized -100..100 that the UI viewer feeds to setJointValue as DEGREES
-  (robot-models-context.tsx); a tighter limit silently clamps the pose.
+  entry in robots/catalog/uarm.py maps j{n}.pos to j{n}), and keep every revolute
+  limit wide, because the leader publishes FOLLOWER DEGREES that the UI viewer
+  feeds to setJointValue as degrees (robot-models-context.tsx); a tighter limit
+  silently clamps the pose. +/-360 deg (2*pi) covers the FR5's widest joint --
+  j2 and j4 reach -263 deg -- with room to spare. These are display bounds for a
+  stub model, not physical limits of the leader.
 -->
 <robot name="uarm_leader">
 
@@ -59,7 +61,7 @@
     <parent link="base_link" />
     <child link="shoulder_link" />
     <axis xyz="0 0 1" />
-    <limit lower="-3.1416" upper="3.1416" effort="10" velocity="3.14" />
+    <limit lower="-6.2832" upper="6.2832" effort="10" velocity="3.14" />
   </joint>
 
   <link name="shoulder_link">
@@ -89,7 +91,7 @@
     <parent link="shoulder_link" />
     <child link="upperarm_link" />
     <axis xyz="0 1 0" />
-    <limit lower="-3.1416" upper="3.1416" effort="10" velocity="3.14" />
+    <limit lower="-6.2832" upper="6.2832" effort="10" velocity="3.14" />
   </joint>
 
   <link name="upperarm_link">
@@ -119,7 +121,7 @@
     <parent link="upperarm_link" />
     <child link="forearm_link" />
     <axis xyz="0 1 0" />
-    <limit lower="-3.1416" upper="3.1416" effort="10" velocity="3.14" />
+    <limit lower="-6.2832" upper="6.2832" effort="10" velocity="3.14" />
   </joint>
 
   <link name="forearm_link">
@@ -149,7 +151,7 @@
     <parent link="forearm_link" />
     <child link="wrist1_link" />
     <axis xyz="0 1 0" />
-    <limit lower="-3.1416" upper="3.1416" effort="10" velocity="3.14" />
+    <limit lower="-6.2832" upper="6.2832" effort="10" velocity="3.14" />
   </joint>
 
   <link name="wrist1_link">
@@ -179,7 +181,7 @@
     <parent link="wrist1_link" />
     <child link="wrist2_link" />
     <axis xyz="0 0 1" />
-    <limit lower="-3.1416" upper="3.1416" effort="10" velocity="3.14" />
+    <limit lower="-6.2832" upper="6.2832" effort="10" velocity="3.14" />
   </joint>
 
   <link name="wrist2_link">
@@ -209,7 +211,7 @@
     <parent link="wrist2_link" />
     <child link="handle_link" />
     <axis xyz="0 1 0" />
-    <limit lower="-3.1416" upper="3.1416" effort="10" velocity="3.14" />
+    <limit lower="-6.2832" upper="6.2832" effort="10" velocity="3.14" />
   </joint>
 
   <!-- Trigger handle: the operator grip, drawn as a stub grip + trigger nub. -->

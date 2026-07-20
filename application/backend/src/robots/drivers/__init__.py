@@ -1,9 +1,10 @@
 """Self-contained RobotClient drivers for arms not covered by the physicalai package.
 
 Currently: Fairino FR5 follower (Ethernet / Fairino SDK) and uArm leader (Feetech
-STS3215 serial bus). Both expose the same 6 normalized joint features
-(``j1.pos`` .. ``j6.pos``) so the name-matched ``TeleoperateWorker`` can drive the
-FR5 from the uArm exactly like an SO-ARM leader/follower pair.
+STS3215 serial bus). Both expose the same 6 joint features (``j1.pos`` .. ``j6.pos``),
+in follower degrees rather than SO101's normalized -100..100, so the name-matched
+``TeleoperateWorker`` can drive the FR5 from the uArm exactly like an SO-ARM
+leader/follower pair.
 
 The FR5 follower additionally carries a DH Robotics PGEA-100-40 parallel gripper on
 its wrist flange, exposed as a 7th feature ``gripper.pos``. It is a separate DOF from

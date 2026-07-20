@@ -1,6 +1,7 @@
 import os
 from typing import Literal
 
+from loguru import logger
 from physicalai.robot.so101 import SO101, SO101Calibration
 from physicalai.robot.trossen import BimanualWidowXAI, WidowXAI
 
@@ -79,9 +80,17 @@ class RobotClientFactory:
     @staticmethod
     def _build_fr5(robot: FR5Robot) -> FR5FollowerClient:
         ip = robot.payload.connection_string or "192.168.58.2"
-        # The follower carries the PGEA gripper; it activates on connect and is a
-        # no-op (logged) if no gripper responds, so it is enabled by default.
-        return FR5FollowerClient(FR5FollowerConfig(ip=ip))
+        # The gripper joins the pipeline only when something can actually drive it: the
+        # uArm's trigger, configured by the same env pair the leader reads. Without it
+        # nothing ever commands the gripper, while gripper.pos would still enter the
+        # feature list -- so recording would write a column holding the follower's
+        # *assumed* opening (a constant) as the observation and nothing at all as the
+        # action, which is how dataset writes failed with KeyError: 'gripper.pos'.
+        # A constant guess is worse in a dataset than an absent column.
+        gripper = _env_int("UARM_TRIGGER_RAW_OPEN") is not None and _env_int("UARM_TRIGGER_RAW_CLOSE") is not None
+        if not gripper:
+            logger.info("uArm trigger not configured; FR5 gripper left out of the feature set")
+        return FR5FollowerClient(FR5FollowerConfig(ip=ip, gripper_enabled=gripper))
 
     async def _build_uarm(self, robot: UArmRobot) -> UArmLeaderClient:
         port = robot.payload.connection_string
