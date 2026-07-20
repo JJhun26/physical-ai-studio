@@ -10,6 +10,14 @@ from . import so101, widowxai
 
 BUILTIN_ROBOT_ASSETS_ROOT = Path(__file__).resolve().parents[2] / "static" / "robot-assets"
 
+# Files that only ``sync_robot_assets`` produces (vendored from upstream description
+# repos). Their presence gates the startup sync. The SO101/WidowX URDFs are synced
+# wholesale; for FR5 only the arm meshes are synced (the fr5_pgea URDF and PGEA gripper
+# meshes are version controlled), so a representative arm mesh is the sync marker here.
+_SYNC_MARKERS = (
+    "fr5_pgea/meshes/fairino5_v6/base_link.STL",
+)
+
 
 def get_builtin_robot_assets_root() -> Path:
     """Return the backend-owned directory for built-in robot assets."""
@@ -17,11 +25,19 @@ def get_builtin_robot_assets_root() -> Path:
 
 
 def builtin_robot_assets_are_available() -> bool:
-    """Return whether all built-in robot URDF assets are present locally."""
+    """Return whether every synced built-in robot asset is present locally.
+
+    Only covers what ``sync_robot_assets`` vendors from upstream description repos,
+    because this gates that sync on startup. Hand-authored, version-controlled assets
+    (the uArm leader URDF, the fr5_pgea URDF and PGEA gripper meshes) are excluded: a
+    missing one must not keep re-triggering a sync that cannot restore it.
+    """
     root = get_builtin_robot_assets_root()
     definitions = so101.get_definitions() + widowxai.get_definitions()
 
-    return all((root / Path(definition.urdf_relative_path)).is_file() for definition in definitions)
+    urdfs_present = all((root / Path(d.urdf_relative_path)).is_file() for d in definitions)
+    markers_present = all((root / Path(marker)).is_file() for marker in _SYNC_MARKERS)
+    return urdfs_present and markers_present
 
 
 def resolve_robot_urdf_path(definition: RobotCatalogDefinition) -> Path:

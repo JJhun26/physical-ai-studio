@@ -13,6 +13,14 @@ _REQUIRED_ROBOT_ASSET_PATHS = (
     Path("SO101/so101_new_calib.urdf"),
     Path("widowx/urdf/generated/wxai/wxai_follower.urdf"),
     Path("widowx/urdf/generated/stationary_ai.urdf"),
+    # FR5 + PGEA gripper combined model: hand-authored URDF and gripper meshes are
+    # version controlled; the arm meshes are synced.
+    Path("fr5_pgea/urdf/fr5_pgea.urdf"),
+    Path("fr5_pgea/meshes/pgea/body.STL"),
+    Path("fr5_pgea/meshes/fairino5_v6/base_link.STL"),
+    # Version controlled rather than synced, so this one failing means the
+    # checkout is broken, not that sync-robot-assets still needs to run.
+    Path("uarm/urdf/uarm_leader.urdf"),
 )
 
 

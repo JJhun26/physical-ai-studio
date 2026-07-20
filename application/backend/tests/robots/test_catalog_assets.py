@@ -7,19 +7,23 @@ def test_get_builtin_robot_assets_root_uses_shared_constant() -> None:
     assert assets.get_builtin_robot_assets_root() == assets.BUILTIN_ROBOT_ASSETS_ROOT
 
 
-def test_builtin_robot_assets_are_available_requires_all_urdfs(tmp_path, monkeypatch) -> None:
+def test_builtin_robot_assets_are_available_requires_all_synced_assets(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(assets, "BUILTIN_ROBOT_ASSETS_ROOT", tmp_path)
     definitions = so101.get_definitions() + widowxai.get_definitions()
-    urdf_relative_paths = {definition.urdf_relative_path for definition in definitions}
+    # Availability now gates on both the SO101/WidowX URDFs and the FR5 sync markers
+    # (the fr5_pgea arm meshes); the fr5_pgea URDF itself is version controlled and
+    # deliberately not part of this check.
+    synced_paths = {definition.urdf_relative_path for definition in definitions} | set(assets._SYNC_MARKERS)
 
-    for relative_path in urdf_relative_paths:
+    for relative_path in synced_paths:
         path = tmp_path / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("urdf", encoding="utf-8")
+        path.write_text("asset", encoding="utf-8")
 
     assert assets.builtin_robot_assets_are_available()
 
-    (tmp_path / next(iter(urdf_relative_paths))).unlink()
+    # missing any one synced asset -> not available (each is a separate sync)
+    (tmp_path / next(iter(synced_paths))).unlink()
 
     assert not assets.builtin_robot_assets_are_available()
 

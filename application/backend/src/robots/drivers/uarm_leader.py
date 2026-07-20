@@ -35,7 +35,7 @@ from loguru import logger
 from robots.robot_client import RobotClient
 from schemas.robot import RobotType
 
-from . import JOINT_NAMES, NUM_JOINTS, POS_FEATURES
+from . import GRIPPER_FEATURE, GRIPPER_STROKE_M, JOINT_NAMES, NUM_JOINTS, POS_FEATURES
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -61,6 +61,18 @@ class UArmLeaderConfig:
     sdk_path: str = field(default_factory=lambda: os.environ.get("UARM_FEETECH_SDK", ""))
     # One entry per joint j1..j6, in order. Defaults: motor ids 1..6, full turn.
     joints: list[JointCalibration] | None = None
+
+    # -- trigger -> gripper.pos ----------------------------------------------
+    # The uArm's trigger servo (id 7) maps to the FR5 follower's gripper. Publishing
+    # gripper.pos requires knowing the trigger's raw endpoints; without both, the
+    # trigger is not read and the follower simply holds its gripper (safe).
+    gripper_motor_id: int = 7
+    gripper_raw_open: int | None = None
+    gripper_raw_close: int | None = None
+
+    @property
+    def gripper_enabled(self) -> bool:
+        return self.gripper_raw_open is not None and self.gripper_raw_close is not None
 
     def resolved_joints(self) -> list[JointCalibration]:
         if self.joints is not None:
@@ -117,6 +129,8 @@ class UArmLeaderClient(RobotClient):
         reader = group_sync_read(pk, present_pos_l, 4)
         for jc in self._joints:
             reader.addParam(jc.motor_id)
+        if self._config.gripper_enabled:
+            reader.addParam(self._config.gripper_motor_id)
         self._port_handler = ph
         self._reader = reader
         self._connected = True
@@ -149,7 +163,24 @@ class UArmLeaderClient(RobotClient):
             if jc.drive_mode == 1:
                 norm = -norm
             state[f"{JOINT_NAMES[j]}.pos"] = norm
+        if self._config.gripper_enabled:
+            g = self._read_gripper_m()
+            if g is not None:
+                state[GRIPPER_FEATURE] = g
         return state
+
+    def _read_gripper_m(self) -> float | None:
+        """Trigger servo (id 7) raw -> gripper opening in metres [0, GRIPPER_STROKE_M]."""
+        mid = self._config.gripper_motor_id
+        if not self._reader.isAvailable(mid, self._addr, 2)[0]:
+            return None
+        raw = self._reader.getData(mid, self._addr, 2) % 4096
+        lo, hi = self._config.gripper_raw_close, self._config.gripper_raw_open
+        span = hi - lo
+        if span == 0:
+            return 0.0
+        frac = _clamp((raw - lo) / span, 0.0, 1.0)
+        return frac * GRIPPER_STROKE_M
 
     def ping(self) -> dict:
         return self._create_event("pong")
@@ -176,4 +207,7 @@ class UArmLeaderClient(RobotClient):
         return forces
 
     def features(self) -> list[str]:
-        return list(POS_FEATURES)
+        feats = list(POS_FEATURES)
+        if self._config.gripper_enabled:
+            feats.append(GRIPPER_FEATURE)
+        return feats

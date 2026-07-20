@@ -1,3 +1,4 @@
+import os
 from typing import Literal
 
 from physicalai.robot.so101 import SO101, SO101Calibration
@@ -12,6 +13,16 @@ from schemas.calibration import Calibration
 from schemas.robot import FR5Robot, Robot, RobotType, SO101Robot, TrossenBimanualRobot, UArmRobot
 from services.robot_calibration_service import RobotCalibrationService
 from utils.serial_robot_tools import RobotConnectionManager, find_so101_port, serial_port_from_so101
+
+
+def _env_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 class RobotClientFactory:
@@ -68,6 +79,8 @@ class RobotClientFactory:
     @staticmethod
     def _build_fr5(robot: FR5Robot) -> FR5FollowerClient:
         ip = robot.payload.connection_string or "192.168.58.2"
+        # The follower carries the PGEA gripper; it activates on connect and is a
+        # no-op (logged) if no gripper responds, so it is enabled by default.
         return FR5FollowerClient(FR5FollowerConfig(ip=ip))
 
     async def _build_uarm(self, robot: UArmRobot) -> UArmLeaderClient:
@@ -94,7 +107,15 @@ class RobotClientFactory:
                     )
                 )
 
-        return UArmLeaderClient(UArmLeaderConfig(port=port, joints=joints))
+        # Trigger (servo id 7) -> follower gripper. Its raw endpoints are a per-rig
+        # calibration, supplied via env like the SDK override; absent -> the trigger
+        # is not read and the follower just holds its gripper.
+        raw_open = _env_int("UARM_TRIGGER_RAW_OPEN")
+        raw_close = _env_int("UARM_TRIGGER_RAW_CLOSE")
+
+        return UArmLeaderClient(
+            UArmLeaderConfig(port=port, joints=joints, gripper_raw_open=raw_open, gripper_raw_close=raw_close)
+        )
 
     async def _get_uarm_calibration(self, robot: UArmRobot) -> Calibration | None:
         if robot.active_calibration_id is None:

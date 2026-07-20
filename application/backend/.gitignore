@@ -4,3 +4,10 @@ data/
 # Robot assets are cloned at runtime - only track the directory, not contents
 src/static/robot-assets/*
 !src/static/robot-assets/.gitkeep
+# ...except the uArm leader, whose URDF is hand-authored rather than cloned from
+# an upstream description package, so sync-robot-assets cannot restore it.
+!src/static/robot-assets/uarm/
+# ...and the FR5 + PGEA gripper package: its URDF and gripper meshes are hand-authored,
+# but the FR5 arm meshes under meshes/fairino5_v6/ are still synced, so keep those out.
+!src/static/robot-assets/fr5_pgea/
+src/static/robot-assets/fr5_pgea/meshes/fairino5_v6/
